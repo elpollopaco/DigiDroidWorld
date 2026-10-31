@@ -15,7 +15,9 @@ permissions:
 env:
   # ===================== CONFIGURACIÓN (todo fijo aquí) =====================
   # Ruta de tu disco legal (el .cue, o .chd / .pbp / .m3u). Sin comillas dobles dentro.
-  DISC_PATH: "/storage/emulated/0/Games/Digimon World.iso"
+  DISC_PATH: "/storage/emulated/0/Games/Digimon World (USA).cue"
+  # Versión de la app: 1.0, 1.1, 1.2, ... (cámbiala en cada actualización)
+  APP_VERSION: "1.0"
   # =========================================================================
 
 jobs:
@@ -30,6 +32,8 @@ jobs:
           java-version: "17"
 
       - name: Generar proyecto Android
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           mkdir -p p/app/src/main/java/org/elpollopaco/digimonworld p/app/src/main/jniLibs/arm64-v8a
           cd p
@@ -165,6 +169,7 @@ jobs:
           import com.swordfish.libretrodroid.Variable
           import kotlinx.coroutines.runBlocking
           import java.io.File
+          import kotlin.math.abs
 
           // El valor lo pone el workflow desde DISC_PATH (arriba en build.yml).
           const val DISC_PATH = "__DISC_PATH__"
@@ -174,6 +179,7 @@ jobs:
           const val RES_DEFECTO = 1   // 1x
           const val TAM_DEFECTO = 100 // % tamaño de controles
           const val OPA_DEFECTO = 30  // % opacidad de controles
+          const val IDIOMA_DEFECTO = "en" // "en" = inglés, "es" = español
 
           class Ajustes(ctx: Context) {
               private val p = ctx.getSharedPreferences("ajustes", Context.MODE_PRIVATE)
@@ -190,14 +196,21 @@ jobs:
                   get() = p.getInt("opa", OPA_DEFECTO)
                   set(v) { p.edit().putInt("opa", v).apply() }
 
+              var idioma: String
+                  get() = p.getString("idioma", IDIOMA_DEFECTO) ?: IDIOMA_DEFECTO
+                  set(v) { p.edit().putString("idioma", v).apply() }
+
               fun dx(id: Int): Int = p.getInt("dx" + id, 0)
               fun dy(id: Int): Int = p.getInt("dy" + id, 0)
               fun mover(id: Int, dx: Int, dy: Int) {
                   p.edit().putInt("dx" + id, dx).putInt("dy" + id, dy).apply()
               }
 
-              // Borra resolución y controles: todo vuelve al predeterminado
-              fun restablecer() { p.edit().clear().apply() }
+              // Restablece resolución y controles. El idioma se conserva.
+              fun restablecer() {
+                  val actual = idioma
+                  p.edit().clear().putString("idioma", actual).apply()
+              }
           }
 
           class PadButton(
@@ -206,7 +219,8 @@ jobs:
               val keyCode: Int,
               private val ajustes: Ajustes,
               private val send: (Int, Int) -> Unit,
-              private val round: Boolean
+              private val round: Boolean,
+              private val hit: Float
           ) : View(context) {
               var editMode = false
               private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
@@ -225,6 +239,27 @@ jobs:
               private var tx0 = 0f
               private var ty0 = 0f
 
+              // Pulsa o suelta el botón (lo llama la capa de controles)
+              fun presionar(estado: Boolean) {
+                  if (down == estado) return
+                  down = estado
+                  send(if (estado) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP, keyCode)
+                  invalidate()
+              }
+
+              // ¿El punto (x, y), en coordenadas de la capa, cae sobre este botón?
+              fun contiene(x: Float, y: Float): Boolean {
+                  val cx = left + translationX + width / 2f
+                  val cy = top + translationY + height / 2f
+                  if (round) {
+                      val r = minOf(width, height) / 2f * hit
+                      val dx = x - cx
+                      val dy = y - cy
+                      return dx * dx + dy * dy <= r * r
+                  }
+                  return abs(x - cx) <= width / 2f && abs(y - cy) <= height / 2f
+              }
+
               override fun onDraw(c: Canvas) {
                   val base = ajustes.opacidad * 255 / 100
                   fill.alpha = if (down) minOf(255, base + 100) else base
@@ -242,58 +277,121 @@ jobs:
                   c.drawText(label, w / 2, h / 2 - (text.ascent() + text.descent()) / 2, text)
               }
 
+              // Solo se usa en modo edición (arrastrar). En juego los toques los gestiona CapaControles.
               override fun onTouchEvent(e: MotionEvent): Boolean {
-                  if (editMode) {
-                      when (e.actionMasked) {
-                          MotionEvent.ACTION_DOWN -> {
-                              ox = e.rawX
-                              oy = e.rawY
-                              tx0 = translationX
-                              ty0 = translationY
-                          }
-                          MotionEvent.ACTION_MOVE -> {
-                              var nx = tx0 + (e.rawX - ox)
-                              var ny = ty0 + (e.rawY - oy)
-                              val pv = parent as? View
-                              if (pv != null) {
-                                  nx = nx.coerceIn(-left.toFloat(), (pv.width - width - left).toFloat())
-                                  ny = ny.coerceIn(-top.toFloat(), (pv.height - height - top).toFloat())
-                              }
-                              translationX = nx
-                              translationY = ny
-                          }
-                          MotionEvent.ACTION_UP -> {
-                              val d = resources.displayMetrics.density
-                              ajustes.mover(keyCode, (translationX / d).toInt(), (translationY / d).toInt())
-                          }
-                      }
-                      return true
-                  }
+                  if (!editMode) return false
                   when (e.actionMasked) {
                       MotionEvent.ACTION_DOWN -> {
-                          down = true
-                          performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                          send(KeyEvent.ACTION_DOWN, keyCode)
-                          invalidate()
+                          ox = e.rawX
+                          oy = e.rawY
+                          tx0 = translationX
+                          ty0 = translationY
                       }
-                      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                          if (down) {
-                              down = false
-                              send(KeyEvent.ACTION_UP, keyCode)
-                              invalidate()
+                      MotionEvent.ACTION_MOVE -> {
+                          var nx = tx0 + (e.rawX - ox)
+                          var ny = ty0 + (e.rawY - oy)
+                          val pv = parent as? View
+                          if (pv != null) {
+                              nx = nx.coerceIn(-left.toFloat(), (pv.width - width - left).toFloat())
+                              ny = ny.coerceIn(-top.toFloat(), (pv.height - height - top).toFloat())
                           }
+                          translationX = nx
+                          translationY = ny
+                      }
+                      MotionEvent.ACTION_UP -> {
+                          val d = resources.displayMetrics.density
+                          ajustes.mover(keyCode, (translationX / d).toInt(), (translationY / d).toInt())
                       }
                   }
                   return true
               }
           }
 
+          // Capa que sigue cada dedo: al deslizar de un botón a otro suelta el anterior y pulsa el nuevo.
+          // Un mismo dedo puede pulsar dos botones a la vez si toca donde se solapan (diagonales).
+          class CapaControles(context: Context) : FrameLayout(context) {
+              var edicion: Boolean = false
+                  set(v) {
+                      if (v) soltarTodos()
+                      field = v
+                  }
+              private val punteros = HashMap<Int, Set<PadButton>>()
+              private val conteo = HashMap<PadButton, Int>()
+
+              override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+                  if (edicion) return super.dispatchTouchEvent(ev)
+                  when (ev.actionMasked) {
+                      MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                          val i = ev.actionIndex
+                          actualizar(ev.getPointerId(i), ev.getX(i), ev.getY(i), true)
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          for (i in 0 until ev.pointerCount) {
+                              actualizar(ev.getPointerId(i), ev.getX(i), ev.getY(i), false)
+                          }
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                          soltar(ev.getPointerId(ev.actionIndex))
+                      }
+                      MotionEvent.ACTION_CANCEL -> soltarTodos()
+                  }
+                  return true
+              }
+
+              private fun actualizar(id: Int, x: Float, y: Float, tactil: Boolean) {
+                  val nuevos = HashSet<PadButton>()
+                  for (i in 0 until childCount) {
+                      val b = getChildAt(i) as? PadButton ?: continue
+                      if (b.contiene(x, y)) nuevos.add(b)
+                  }
+                  val antes: Set<PadButton> = punteros[id] ?: emptySet()
+                  for (b in antes) {
+                      if (b !in nuevos) quitar(b)
+                  }
+                  for (b in nuevos) {
+                      if (b !in antes) poner(b, tactil)
+                  }
+                  punteros[id] = nuevos
+              }
+
+              private fun poner(b: PadButton, haptico: Boolean) {
+                  val n = (conteo[b] ?: 0) + 1
+                  conteo[b] = n
+                  if (n == 1) {
+                      if (haptico) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                      b.presionar(true)
+                  }
+              }
+
+              private fun quitar(b: PadButton) {
+                  val n = (conteo[b] ?: 1) - 1
+                  if (n <= 0) {
+                      conteo.remove(b)
+                      b.presionar(false)
+                  } else {
+                      conteo[b] = n
+                  }
+              }
+
+              private fun soltar(id: Int) {
+                  val antes = punteros.remove(id) ?: return
+                  for (b in antes) quitar(b)
+              }
+
+              fun soltarTodos() {
+                  for (b in conteo.keys.toList()) b.presionar(false)
+                  conteo.clear()
+                  punteros.clear()
+              }
+          }
+
           private class Def(
               val label: String, val key: Int, val w: Int, val h: Int, val g: Int,
-              val l: Int, val t: Int, val r: Int, val b: Int, val round: Boolean
+              val l: Int, val t: Int, val r: Int, val b: Int, val round: Boolean, val hit: Float
           )
 
-          // Posición predeterminada de cada botón (en dp, a 100 % de tamaño)
+          // Posición predeterminada de cada botón (en dp, a 100 % de tamaño).
+          // La cruceta tiene zona de toque ampliada (1.85): entre dos direcciones se pulsan ambas = diagonal.
           private fun definiciones(): List<Def> {
               val ia = Gravity.LEFT or Gravity.BOTTOM
               val da = Gravity.RIGHT or Gravity.BOTTOM
@@ -302,23 +400,23 @@ jobs:
               val ca = Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
               return listOf(
                   // Cruceta
-                  Def("▲", KeyEvent.KEYCODE_DPAD_UP, 56, 56, ia, 62, 0, 0, 138, true),
-                  Def("▼", KeyEvent.KEYCODE_DPAD_DOWN, 56, 56, ia, 62, 0, 0, 26, true),
-                  Def("◀", KeyEvent.KEYCODE_DPAD_LEFT, 56, 56, ia, 6, 0, 0, 82, true),
-                  Def("▶", KeyEvent.KEYCODE_DPAD_RIGHT, 56, 56, ia, 118, 0, 0, 82, true),
+                  Def("▲", KeyEvent.KEYCODE_DPAD_UP, 56, 56, ia, 62, 0, 0, 138, true, 1.85f),
+                  Def("▼", KeyEvent.KEYCODE_DPAD_DOWN, 56, 56, ia, 62, 0, 0, 26, true, 1.85f),
+                  Def("◀", KeyEvent.KEYCODE_DPAD_LEFT, 56, 56, ia, 6, 0, 0, 82, true, 1.85f),
+                  Def("▶", KeyEvent.KEYCODE_DPAD_RIGHT, 56, 56, ia, 118, 0, 0, 82, true, 1.85f),
                   // Acción (por posición: A=abajo=Cruz, B=derecha=Círculo)
-                  Def("△", KeyEvent.KEYCODE_BUTTON_Y, 56, 56, da, 0, 0, 62, 138, true),
-                  Def("✕", KeyEvent.KEYCODE_BUTTON_A, 56, 56, da, 0, 0, 62, 26, true),
-                  Def("□", KeyEvent.KEYCODE_BUTTON_X, 56, 56, da, 0, 0, 118, 82, true),
-                  Def("○", KeyEvent.KEYCODE_BUTTON_B, 56, 56, da, 0, 0, 6, 82, true),
+                  Def("△", KeyEvent.KEYCODE_BUTTON_Y, 56, 56, da, 0, 0, 62, 138, true, 1f),
+                  Def("✕", KeyEvent.KEYCODE_BUTTON_A, 56, 56, da, 0, 0, 62, 26, true, 1f),
+                  Def("□", KeyEvent.KEYCODE_BUTTON_X, 56, 56, da, 0, 0, 118, 82, true, 1f),
+                  Def("○", KeyEvent.KEYCODE_BUTTON_B, 56, 56, da, 0, 0, 6, 82, true, 1f),
                   // Gatillos
-                  Def("L2", KeyEvent.KEYCODE_BUTTON_L2, 64, 40, iar, 16, 16, 0, 0, false),
-                  Def("L1", KeyEvent.KEYCODE_BUTTON_L1, 64, 40, iar, 16, 64, 0, 0, false),
-                  Def("R2", KeyEvent.KEYCODE_BUTTON_R2, 64, 40, dar, 0, 16, 16, 0, false),
-                  Def("R1", KeyEvent.KEYCODE_BUTTON_R1, 64, 40, dar, 0, 64, 16, 0, false),
+                  Def("L2", KeyEvent.KEYCODE_BUTTON_L2, 64, 40, iar, 16, 16, 0, 0, false, 1f),
+                  Def("L1", KeyEvent.KEYCODE_BUTTON_L1, 64, 40, iar, 16, 64, 0, 0, false, 1f),
+                  Def("R2", KeyEvent.KEYCODE_BUTTON_R2, 64, 40, dar, 0, 16, 16, 0, false, 1f),
+                  Def("R1", KeyEvent.KEYCODE_BUTTON_R1, 64, 40, dar, 0, 64, 16, 0, false, 1f),
                   // Select / Start
-                  Def("SELECT", KeyEvent.KEYCODE_BUTTON_SELECT, 84, 34, ca, -100, 0, 0, 14, false),
-                  Def("START", KeyEvent.KEYCODE_BUTTON_START, 84, 34, ca, 100, 0, 0, 14, false)
+                  Def("SELECT", KeyEvent.KEYCODE_BUTTON_SELECT, 84, 34, ca, -100, 0, 0, 14, false, 1f),
+                  Def("START", KeyEvent.KEYCODE_BUTTON_START, 84, 34, ca, 100, 0, 0, 14, false, 1f)
               )
           }
 
@@ -327,7 +425,7 @@ jobs:
               private lateinit var ajustes: Ajustes
               private var retroView: GLRetroView? = null
               private var inicio: View? = null
-              private var capaControles: FrameLayout? = null
+              private var capaControles: CapaControles? = null
               private var engranaje: View? = null
               private var panel: View? = null
               private var barraEdicion: View? = null
@@ -364,6 +462,7 @@ jobs:
               }
 
               override fun onPause() {
+                  capaControles?.soltarTodos()
                   guardarMemoryCard()
                   super.onPause()
               }
@@ -385,6 +484,17 @@ jobs:
 
               // ---------- Utilidades ----------
               private fun dp(v: Number): Int = (v.toFloat() * resources.displayMetrics.density).toInt()
+
+              // Texto según el idioma elegido: tr(inglés, español)
+              private fun tr(en: String, es: String): String = if (ajustes.idioma == "es") es else en
+
+              private fun versionApp(): String {
+                  return try {
+                      packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+                  } catch (e: Exception) {
+                      "?"
+                  }
+              }
 
               private fun texto(t: String, sp: Float = 16f, negrita: Boolean = false, color: Int = Color.WHITE): TextView {
                   val tv = TextView(this)
@@ -444,9 +554,11 @@ jobs:
               // ---------- Pantalla de inicio ----------
               private fun mostrarInicio() {
                   inicio?.let { root.removeView(it) }
+                  val contenedor = FrameLayout(this)
+                  contenedor.setBackgroundColor(Color.BLACK)
+
                   val scroll = ScrollView(this)
                   scroll.isFillViewport = true
-                  scroll.setBackgroundColor(Color.BLACK)
                   val col = LinearLayout(this)
                   col.orientation = LinearLayout.VERTICAL
                   col.gravity = Gravity.CENTER
@@ -461,27 +573,80 @@ jobs:
 
                   col.addView(texto("Digimon World", 28f, true))
                   if (!tieneAcceso()) {
-                      col.addView(texto("Falta el permiso de acceso a todos los archivos para leer tu disco."))
-                      col.addView(boton("Dar permiso") { pedirAcceso() })
+                      col.addView(
+                          texto(
+                              tr(
+                                  "All files access permission is needed to read your disc.",
+                                  "Falta el permiso de acceso a todos los archivos para leer tu disco."
+                              )
+                          )
+                      )
+                      col.addView(boton(tr("Grant permission", "Dar permiso")) { pedirAcceso() })
                   } else if (!File(DISC_PATH).exists()) {
-                      col.addView(texto("No se encontró el disco.\n\nColócalo en esta ruta exacta:"))
+                      col.addView(
+                          texto(
+                              tr(
+                                  "Disc not found.\n\nPlace it at this exact path:",
+                                  "No se encontró el disco.\n\nColócalo en esta ruta exacta:"
+                              )
+                          )
+                      )
                       col.addView(texto(DISC_PATH, 15f, false, Color.YELLOW))
-                      col.addView(boton("Comprobar de nuevo") { mostrarInicio() })
+                      col.addView(boton(tr("Check again", "Comprobar de nuevo")) { mostrarInicio() })
                   } else {
-                      col.addView(texto("Disco encontrado."))
-                      col.addView(boton("▶  Iniciar") { iniciarJuego() })
+                      col.addView(texto(tr("Disc found.", "Disco encontrado.")))
+                      col.addView(boton(tr("▶  Start", "▶  Iniciar")) { iniciarJuego() })
                   }
-                  col.addView(boton("⚙  Ajustes") { mostrarAjustes() })
-
-                  root.addView(
+                  col.addView(boton(tr("⚙  Settings", "⚙  Ajustes")) { mostrarAjustes() })
+                  contenedor.addView(
                       scroll,
                       FrameLayout.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.MATCH_PARENT
                       )
                   )
-                  inicio = scroll
+
+                  // Idioma: abajo a la izquierda
+                  val nombreIdioma = if (ajustes.idioma == "es") "Español" else "English"
+                  val btnIdioma = boton("🌐 " + tr("Language", "Idioma") + ": " + nombreIdioma) { elegirIdioma() }
+                  val lpIdioma = FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      Gravity.LEFT or Gravity.BOTTOM
+                  )
+                  lpIdioma.setMargins(dp(12), 0, 0, dp(12))
+                  btnIdioma.layoutParams = lpIdioma
+                  contenedor.addView(btnIdioma)
+
+                  // Versión: abajo a la derecha
+                  val ver = texto(tr("Version ", "Versión ") + versionApp(), 13f, false, Color.GRAY)
+                  val lpVer = FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      Gravity.RIGHT or Gravity.BOTTOM
+                  )
+                  lpVer.setMargins(0, 0, dp(16), dp(16))
+                  contenedor.addView(ver, lpVer)
+
+                  root.addView(
+                      contenedor,
+                      FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT
+                      )
+                  )
+                  inicio = contenedor
                   traerAlFrente()
+              }
+
+              private fun elegirIdioma() {
+                  AlertDialog.Builder(this)
+                      .setTitle(tr("Language", "Idioma"))
+                      .setItems(arrayOf("English", "Español")) { _, cual ->
+                          ajustes.idioma = if (cual == 1) "es" else "en"
+                          mostrarInicio()
+                      }
+                      .show()
               }
 
               // ---------- Juego ----------
@@ -536,6 +701,7 @@ jobs:
               }
 
               private fun reiniciarApp() {
+                  capaControles?.soltarTodos()
                   guardarMemoryCard()
                   val i = packageManager.getLaunchIntentForPackage(packageName)
                   if (i != null) {
@@ -565,7 +731,8 @@ jobs:
               // ---------- Controles ----------
               private fun construirControles(editar: Boolean) {
                   quitarControles()
-                  val capa = FrameLayout(this)
+                  val capa = CapaControles(this)
+                  capa.edicion = editar
                   capaControles = capa
                   root.addView(
                       capa,
@@ -577,7 +744,7 @@ jobs:
                   val e = ajustes.tamano / 100f
                   val d = resources.displayMetrics.density
                   for (c in definiciones()) {
-                      val b = PadButton(this, c.label, c.key, ajustes, { a, k -> enviar(a, k) }, c.round)
+                      val b = PadButton(this, c.label, c.key, ajustes, { a, k -> enviar(a, k) }, c.round, c.hit)
                       b.editMode = editar
                       val lp = FrameLayout.LayoutParams(dp(c.w * e), dp(c.h * e), c.g)
                       lp.setMargins(dp(c.l * e), dp(c.t * e), dp(c.r * e), dp(c.b * e))
@@ -590,6 +757,7 @@ jobs:
               }
 
               private fun quitarControles() {
+                  capaControles?.soltarTodos()
                   capaControles?.let { root.removeView(it) }
                   capaControles = null
                   botones.clear()
@@ -610,16 +778,16 @@ jobs:
                   col.setPadding(dp(20), dp(12), dp(20), dp(12))
                   scroll.addView(col)
 
-                  col.addView(texto("Ajustes", 22f, true))
+                  col.addView(texto(tr("Settings", "Ajustes"), 22f, true))
 
                   // Resolución
-                  col.addView(texto("Resolución", 16f, true))
+                  col.addView(texto(tr("Resolution", "Resolución"), 16f, true))
                   val grupo = RadioGroup(this)
                   grupo.orientation = RadioGroup.HORIZONTAL
                   grupo.gravity = Gravity.CENTER
                   val r1 = RadioButton(this)
                   r1.id = View.generateViewId()
-                  r1.text = "1x (predeterminada)"
+                  r1.text = tr("1x (default)", "1x (predeterminada)")
                   val r2 = RadioButton(this)
                   r2.id = View.generateViewId()
                   r2.text = "2x"
@@ -629,43 +797,48 @@ jobs:
                   grupo.setOnCheckedChangeListener { _, id -> ajustes.resolucion = if (id == r2.id) 2 else 1 }
                   col.addView(grupo)
                   if (enJuego) {
-                      col.addView(texto("Cambiar la resolución reinicia el juego.", 13f, false, Color.LTGRAY))
+                      col.addView(
+                          texto(
+                              tr("Changing the resolution restarts the game.", "Cambiar la resolución reinicia el juego."),
+                              13f, false, Color.LTGRAY
+                          )
+                      )
                   }
 
                   // Controles
-                  col.addView(texto("Controles", 16f, true))
-                  val tamTxt = texto("Tamaño: " + ajustes.tamano + "%", 14f)
+                  col.addView(texto(tr("Controls", "Controles"), 16f, true))
+                  val tamTxt = texto(tr("Size: ", "Tamaño: ") + ajustes.tamano + "%", 14f)
                   col.addView(tamTxt)
                   val tam = SeekBar(this)
                   tam.max = 100
                   tam.progress = ajustes.tamano - 50
                   tam.setOnSeekBarChangeListener(cambio { p ->
                       ajustes.tamano = p + 50
-                      tamTxt.text = "Tamaño: " + ajustes.tamano + "%"
+                      tamTxt.text = tr("Size: ", "Tamaño: ") + ajustes.tamano + "%"
                       construirControles(enEdicion)
                   })
                   col.addView(tam)
 
-                  val opaTxt = texto("Opacidad: " + ajustes.opacidad + "%", 14f)
+                  val opaTxt = texto(tr("Opacity: ", "Opacidad: ") + ajustes.opacidad + "%", 14f)
                   col.addView(opaTxt)
                   val opa = SeekBar(this)
                   opa.max = 90
                   opa.progress = ajustes.opacidad - 10
                   opa.setOnSeekBarChangeListener(cambio { p ->
                       ajustes.opacidad = p + 10
-                      opaTxt.text = "Opacidad: " + ajustes.opacidad + "%"
+                      opaTxt.text = tr("Opacity: ", "Opacidad: ") + ajustes.opacidad + "%"
                       botones.forEach { it.invalidate() }
                   })
                   col.addView(opa)
 
-                  col.addView(boton("Mover controles") { entrarEdicion() })
-                  col.addView(boton("Restablecer todo") {
+                  col.addView(boton(tr("Move controls", "Mover controles")) { entrarEdicion() })
+                  col.addView(boton(tr("Reset all", "Restablecer todo")) {
                       ajustes.restablecer()
                       cerrarPanel()
                       construirControles(false)
                       mostrarAjustes(false)
                   })
-                  col.addView(boton("Cerrar") { cerrarAjustes() })
+                  col.addView(boton(tr("Close", "Cerrar")) { cerrarAjustes() })
 
                   root.addView(
                       scroll,
@@ -693,13 +866,15 @@ jobs:
                   }
                   if (ajustes.resolucion != resInicial) {
                       AlertDialog.Builder(this)
-                          .setTitle("Cambiar resolución")
+                          .setTitle(tr("Change resolution", "Cambiar resolución"))
                           .setMessage(
-                              "El juego se reiniciará y se perderá el progreso que no hayas " +
-                                  "guardado dentro del juego. ¿Continuar?"
+                              tr(
+                                  "The game will restart and any progress you haven't saved in the game will be lost. Continue?",
+                                  "El juego se reiniciará y se perderá el progreso que no hayas guardado dentro del juego. ¿Continuar?"
+                              )
                           )
-                          .setPositiveButton("Reiniciar") { _, _ -> reiniciarApp() }
-                          .setNegativeButton("Cancelar") { _, _ -> ajustes.resolucion = resInicial }
+                          .setPositiveButton(tr("Restart", "Reiniciar")) { _, _ -> reiniciarApp() }
+                          .setNegativeButton(tr("Cancel", "Cancelar")) { _, _ -> ajustes.resolucion = resInicial }
                           .setCancelable(false)
                           .show()
                   }
@@ -708,6 +883,7 @@ jobs:
               private fun entrarEdicion() {
                   cerrarPanel()
                   enEdicion = true
+                  capaControles?.edicion = true
                   engranaje?.visibility = View.GONE
                   botones.forEach {
                       it.editMode = true
@@ -718,8 +894,8 @@ jobs:
                   barra.gravity = Gravity.CENTER
                   barra.setBackgroundColor(Color.argb(200, 0, 0, 0))
                   barra.setPadding(dp(12), dp(6), dp(12), dp(6))
-                  barra.addView(texto("Arrastra los botones para moverlos", 14f))
-                  val listo = boton("Listo") { salirEdicion() }
+                  barra.addView(texto(tr("Drag the buttons to move them", "Arrastra los botones para moverlos"), 14f))
+                  val listo = boton(tr("Done", "Listo")) { salirEdicion() }
                   listo.layoutParams = LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT)
                   barra.addView(listo)
                   root.addView(
@@ -738,6 +914,7 @@ jobs:
                   barraEdicion?.let { root.removeView(it) }
                   barraEdicion = null
                   enEdicion = false
+                  capaControles?.edicion = false
                   engranaje?.visibility = View.VISIBLE
                   botones.forEach {
                       it.editMode = false
@@ -763,6 +940,8 @@ jobs:
           EOF
 
           sed -i "s|__DISC_PATH__|${DISC_PATH}|" app/src/main/java/org/elpollopaco/digimonworld/MainActivity.kt
+          sed -i "s|versionName = \"1.0\"|versionName = \"${APP_VERSION}\"|" app/build.gradle.kts
+          sed -i "s|versionCode = 1|versionCode = ${RUN_NUMBER}|" app/build.gradle.kts
 
       - name: Icono de la app (opcional - sube icon.png a la raíz del repo)
         run: |
@@ -794,6 +973,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: Digimon World APK ${{ github.run_number }}
+          tag_name: v${{ env.APP_VERSION }}-build${{ github.run_number }}
+          name: Digimon World v${{ env.APP_VERSION }} (build ${{ github.run_number }})
           files: p/app/build/outputs/apk/debug/app-debug.apk
