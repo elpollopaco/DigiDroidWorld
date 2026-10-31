@@ -20,7 +20,7 @@ env:
   #   Digimon World (Japan): .iso
   DISC_FOLDER: "/storage/emulated/0/Games"
   # Versión de la app: 1.0, 1.1, 1.2, ... (cámbiala en cada actualización)
-  APP_VERSION: "1.0"
+  APP_VERSION: "1.2"
   # =========================================================================
 
 jobs:
