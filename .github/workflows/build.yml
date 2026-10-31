@@ -20,7 +20,7 @@ env:
   #   Digimon World (Japan): .iso
   DISC_FOLDER: "/storage/emulated/0/Games"
   # Versión de la app: 1.0, 1.1, 1.2, ... (cámbiala en cada actualización)
-  APP_VERSION: "1.2"
+  APP_VERSION: "1.0"
   # =========================================================================
 
 jobs:
@@ -154,6 +154,7 @@ jobs:
           import android.graphics.Paint
           import android.graphics.Typeface
           import android.graphics.drawable.GradientDrawable
+          import android.media.AudioManager
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
@@ -177,6 +178,7 @@ jobs:
           import android.widget.ScrollView
           import android.widget.SeekBar
           import android.widget.TextView
+          import android.widget.Toast
           import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
           import androidx.core.view.WindowCompat
@@ -473,6 +475,9 @@ jobs:
               private var discoListo: Disco? = null
               private var idEscaneo = 0
               private var cargando = false
+              private var startDown = false
+              private var selectDown = false
+              private var comboUsado = false
               private val ejecutor = Executors.newSingleThreadExecutor()
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -480,6 +485,7 @@ jobs:
                   window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                   WindowCompat.setDecorFitsSystemWindows(window, false)
                   ajustes = Ajustes(this)
+                  volumeControlStream = AudioManager.STREAM_MUSIC
                   root = FrameLayout(this)
                   root.setBackgroundColor(Color.BLACK)
                   setContentView(root)
@@ -511,6 +517,9 @@ jobs:
               }
 
               override fun onPause() {
+                  startDown = false
+                  selectDown = false
+                  comboUsado = false
                   capaControles?.soltarTodos()
                   guardarMemoryCard()
                   super.onPause()
@@ -943,7 +952,19 @@ jobs:
                   retroView = view
                   enviar = { a, k -> view.sendKeyEvent(a, k, 0) }
                   construirControles(false)
-                  crearEngranaje()
+                  if (!ajustes.modoGamepad) {
+                      crearEngranaje()
+                  } else {
+                      // En Modo Gamepad no hay engranaje: avisar de cómo abrir los ajustes
+                      Toast.makeText(
+                          this,
+                          tr(
+                              "Press START + SELECT to open settings",
+                              "Presiona START + SELECT para abrir los ajustes"
+                          ),
+                          Toast.LENGTH_LONG
+                      ).show()
+                  }
               }
 
               private fun guardarMemoryCard() {
@@ -1063,16 +1084,7 @@ jobs:
                       )
                   }
 
-                  if (ajustes.modoGamepad) {
-                      col.addView(
-                          texto(
-                              tr(
-                                  "Gamepad mode is ON: touch controls are hidden.",
-                                  "Modo Gamepad activado: los controles táctiles están ocultos."
-                              ), 14f, false, Color.LTGRAY
-                          )
-                      )
-                  } else {
+                  if (!ajustes.modoGamepad) {
                       // Controles
                       col.addView(texto(tr("Controls", "Controles"), 16f, true))
                       val tamTxt = texto(tr("Size: ", "Tamaño: ") + ajustes.tamano + "%", 14f)
@@ -1101,12 +1113,14 @@ jobs:
 
                       col.addView(boton(tr("Move controls", "Mover controles")) { entrarEdicion() })
                   }
-                  col.addView(boton(tr("Reset all", "Restablecer todo")) {
-                      ajustes.restablecer()
-                      cerrarPanel()
-                      construirControles(false)
-                      mostrarAjustes(false)
-                  })
+                  if (!ajustes.modoGamepad) {
+                      col.addView(boton(tr("Reset all", "Restablecer todo")) {
+                          ajustes.restablecer()
+                          cerrarPanel()
+                          construirControles(false)
+                          mostrarAjustes(false)
+                      })
+                  }
                   col.addView(boton(tr("Close", "Cerrar")) { cerrarAjustes() })
 
                   root.addView(
@@ -1192,15 +1206,40 @@ jobs:
                   mostrarAjustes(false)
               }
 
-              // Mandos físicos
+              // Mandos físicos. En Modo Gamepad, START + SELECT (en cualquier orden) abre/cierra los ajustes.
               override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                   val v = retroView
-                  val esMando = (event.source and InputDevice.SOURCE_GAMEPAD) != 0 ||
-                      (event.source and InputDevice.SOURCE_DPAD) != 0
-                  if (v != null && esMando && event.keyCode != KeyEvent.KEYCODE_BACK &&
+                  // Comparar con == (no != 0): SOURCE_GAMEPAD comparte un bit con SOURCE_KEYBOARD
+                  val esMando = (event.source and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+                      (event.source and InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD
+                  val esVolumen = event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+                      event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+                      event.keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
+                  if (v != null && esMando && !esVolumen && event.keyCode != KeyEvent.KEYCODE_BACK &&
                       (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP)
                   ) {
-                      v.sendKeyEvent(event.action, event.keyCode, 0)
+                      val k = event.keyCode
+                      val abajo = event.action == KeyEvent.ACTION_DOWN
+                      if (k == KeyEvent.KEYCODE_BUTTON_START || k == KeyEvent.KEYCODE_BUTTON_SELECT) {
+                          if (k == KeyEvent.KEYCODE_BUTTON_START) startDown = abajo else selectDown = abajo
+                          if (ajustes.modoGamepad && startDown && selectDown && !comboUsado) {
+                              comboUsado = true
+                              // Soltar ambos botones en el juego para que no se queden pulsados
+                              v.sendKeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_START, 0)
+                              v.sendKeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_SELECT, 0)
+                              if (enEdicion) {
+                                  // nada: en Modo Gamepad no hay edición de controles
+                              } else if (panel != null) {
+                                  cerrarAjustes()
+                              } else {
+                                  mostrarAjustes()
+                              }
+                              return true
+                          }
+                          if (!startDown && !selectDown) comboUsado = false
+                          if (comboUsado) return true // ignorar hasta soltar ambos
+                      }
+                      v.sendKeyEvent(event.action, k, 0)
                       return true
                   }
                   return super.dispatchKeyEvent(event)
