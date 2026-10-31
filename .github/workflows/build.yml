@@ -14,10 +14,13 @@ permissions:
 
 env:
   # ===================== CONFIGURACIÓN (todo fijo aquí) =====================
-  # Ruta de tu disco legal (el .cue, o .chd / .pbp / .m3u). Sin comillas dobles dentro.
-  DISC_PATH: "/storage/emulated/0/Games/Digimon World (USA).cue"
+  # Carpeta donde pones tu disco (sin comillas dobles dentro).
+  # Los nombres de archivo NO importan, pero deben ser copias exactas (se verifica el SHA-256):
+  #   Digimon World (USA):   .bin + .cue (los dos, en esta carpeta)
+  #   Digimon World (Japan): .iso
+  DISC_FOLDER: "/storage/emulated/0/Games"
   # Versión de la app: 1.0, 1.1, 1.2, ... (cámbiala en cada actualización)
-  APP_VERSION: "1.0"
+  APP_VERSION: "1.1"
   # =========================================================================
 
 jobs:
@@ -169,10 +172,18 @@ jobs:
           import com.swordfish.libretrodroid.Variable
           import kotlinx.coroutines.runBlocking
           import java.io.File
+          import java.io.FileInputStream
+          import java.security.MessageDigest
+          import java.util.concurrent.Executors
           import kotlin.math.abs
 
-          // El valor lo pone el workflow desde DISC_PATH (arriba en build.yml).
-          const val DISC_PATH = "__DISC_PATH__"
+          // El valor lo pone el workflow desde DISC_FOLDER (arriba en build.yml).
+          const val DISC_FOLDER = "__DISC_FOLDER__"
+
+          // SHA-256 de los discos permitidos (los nombres de archivo no importan)
+          const val HASH_USA_BIN = "06084490ea0db34099b31495ccba4ec18fb0ff25c7683c508e9d2db93d4495f4"
+          const val HASH_USA_CUE = "82b297b9b499fea9c7f361a497b933b7f971394148212eca03e4798ddc0c98d1"
+          const val HASH_JP_ISO = "b5ff9ed251bced70c20eb911eab8ac3e5b77d7a140983d3b5dc31decac4837af"
           const val CORE_LIB = "libpcsx_rearmed_libretro_android.so"
 
           // Valores predeterminados de los ajustes
@@ -420,6 +431,11 @@ jobs:
               )
           }
 
+          class Disco(val ruta: String, val nombre: String)
+
+          // disco != null -> hay un disco válido. binOk/cueOk indican si se encontró cada archivo válido.
+          class Resultado(val disco: Disco?, val carpetaOk: Boolean, val binOk: Boolean, val cueOk: Boolean)
+
           class MainActivity : AppCompatActivity() {
               private lateinit var root: FrameLayout
               private lateinit var ajustes: Ajustes
@@ -434,6 +450,10 @@ jobs:
               private var enEdicion = false
               private var resInicial = RES_DEFECTO
               private val sramFile by lazy { File(filesDir, "saves/memcard.srm") }
+              private var discoListo: Disco? = null
+              private var idEscaneo = 0
+              private var cargando = false
+              private val ejecutor = Executors.newSingleThreadExecutor()
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -452,10 +472,19 @@ jobs:
                       systemBarsBehavior =
                           WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                   }
-                  if (retroView != null || panel != null || enEdicion) return
-                  if (intent.getBooleanExtra("autostart", false) && listoParaJugar()) {
+                  if (retroView != null || panel != null || enEdicion || cargando) return
+                  if (intent.getBooleanExtra("autostart", false) && tieneAcceso()) {
                       intent.removeExtra("autostart")
-                      iniciarJuego()
+                      cargando = true
+                      ejecutor.execute {
+                          val r = escanear { }
+                          runOnUiThread {
+                              cargando = false
+                              if (isFinishing) return@runOnUiThread
+                              discoListo = r.disco
+                              if (r.disco != null) iniciarJuego() else mostrarInicio()
+                          }
+                      }
                   } else {
                       mostrarInicio()
                   }
@@ -549,7 +578,104 @@ jobs:
                   }
               }
 
-              private fun listoParaJugar(): Boolean = tieneAcceso() && File(DISC_PATH).exists()
+              // ---------- Verificación del disco (SHA-256) ----------
+              private fun sha256(f: File, avance: (String) -> Unit): String {
+                  val prefs = getSharedPreferences("hashes", Context.MODE_PRIVATE)
+                  val clave = "h:" + f.absolutePath + "|" + f.length() + "|" + f.lastModified()
+                  val guardado = prefs.getString(clave, null)
+                  if (guardado != null) return guardado
+                  val md = MessageDigest.getInstance("SHA-256")
+                  val total = f.length()
+                  var leidos = 0L
+                  var ultimo = -1
+                  val buf = ByteArray(1 shl 20)
+                  FileInputStream(f).use { ins ->
+                      while (true) {
+                          val n = ins.read(buf)
+                          if (n < 0) break
+                          md.update(buf, 0, n)
+                          leidos += n
+                          if (total > 1000000L) {
+                              val p = (leidos * 100 / total).toInt()
+                              if (p != ultimo) {
+                                  ultimo = p
+                                  avance(tr("Verifying ", "Verificando ") + f.name + "  " + p + "%")
+                              }
+                          }
+                      }
+                  }
+                  val hex = md.digest().joinToString("") { "%02x".format(it) }
+                  prefs.edit().putString(clave, hex).apply()
+                  return hex
+              }
+
+              // Si el .cue apunta a otro nombre de .bin, crea un .cue temporal junto al .bin con el nombre real
+              private fun prepararCue(cue: File, bin: File): String? {
+                  return try {
+                      val contenido = cue.readText(Charsets.ISO_8859_1)
+                      val re = Regex("(?i)(FILE\\s+)(\"[^\"]*\"|\\S+)(\\s+BINARY)")
+                      val m = re.find(contenido) ?: return cue.absolutePath
+                      val ref = m.groupValues[2].trim('"')
+                      if (ref == bin.name) return cue.absolutePath
+                      val nuevo = contenido.replaceFirst(
+                          re,
+                          Regex.escapeReplacement(m.groupValues[1] + "\"" + bin.name + "\"" + m.groupValues[3])
+                      )
+                      val tmp = File(bin.parentFile, ".digimon_runtime.cue")
+                      tmp.writeText(nuevo, Charsets.ISO_8859_1)
+                      tmp.absolutePath
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+
+              // Busca en la carpeta un disco válido, sin importar los nombres de archivo
+              private fun escanear(avance: (String) -> Unit): Resultado {
+                  val carpeta = File(DISC_FOLDER)
+                  try {
+                      val todos = carpeta.listFiles()
+                      if (!carpeta.isDirectory || todos == null) return Resultado(null, false, false, false)
+                      val archivos = todos.filter { it.isFile }.sortedBy { it.name.lowercase() }
+                      val cues = archivos.filter { it.extension.lowercase() == "cue" }
+                      val isos = archivos.filter { it.extension.lowercase() == "iso" }
+                      val bins = archivos.filter { it.extension.lowercase() == "bin" }
+
+                      var cueValido: File? = null
+                      for (f in cues) {
+                          if (sha256(f, avance) == HASH_USA_CUE) {
+                              cueValido = f
+                              break
+                          }
+                      }
+                      for (f in isos) {
+                          if (sha256(f, avance) == HASH_JP_ISO) {
+                              return Resultado(
+                                  Disco(f.absolutePath, "Digimon World (Japan) - " + f.name),
+                                  true, false, cueValido != null
+                              )
+                          }
+                      }
+                      var binValido: File? = null
+                      for (f in bins) {
+                          if (sha256(f, avance) == HASH_USA_BIN) {
+                              binValido = f
+                              break
+                          }
+                      }
+                      if (binValido != null && cueValido != null) {
+                          val ruta = prepararCue(cueValido, binValido)
+                          if (ruta != null) {
+                              return Resultado(
+                                  Disco(ruta, "Digimon World (USA) - " + binValido.name),
+                                  true, true, true
+                              )
+                          }
+                      }
+                      return Resultado(null, true, binValido != null, cueValido != null)
+                  } catch (e: Exception) {
+                      return Resultado(null, carpeta.isDirectory, false, false)
+                  }
+              }
 
               // ---------- Pantalla de inicio ----------
               private fun mostrarInicio() {
@@ -572,8 +698,12 @@ jobs:
                   )
 
                   col.addView(texto("Digimon World", 28f, true))
+                  val zona = LinearLayout(this)
+                  zona.orientation = LinearLayout.VERTICAL
+                  zona.gravity = Gravity.CENTER
+                  col.addView(zona)
                   if (!tieneAcceso()) {
-                      col.addView(
+                      zona.addView(
                           texto(
                               tr(
                                   "All files access permission is needed to read your disc.",
@@ -581,21 +711,9 @@ jobs:
                               )
                           )
                       )
-                      col.addView(boton(tr("Grant permission", "Dar permiso")) { pedirAcceso() })
-                  } else if (!File(DISC_PATH).exists()) {
-                      col.addView(
-                          texto(
-                              tr(
-                                  "Disc not found.\n\nPlace it at this exact path:",
-                                  "No se encontró el disco.\n\nColócalo en esta ruta exacta:"
-                              )
-                          )
-                      )
-                      col.addView(texto(DISC_PATH, 15f, false, Color.YELLOW))
-                      col.addView(boton(tr("Check again", "Comprobar de nuevo")) { mostrarInicio() })
+                      zona.addView(boton(tr("Grant permission", "Dar permiso")) { pedirAcceso() })
                   } else {
-                      col.addView(texto(tr("Disc found.", "Disco encontrado.")))
-                      col.addView(boton(tr("▶  Start", "▶  Iniciar")) { iniciarJuego() })
+                      verificarDisco(zona)
                   }
                   col.addView(boton(tr("⚙  Settings", "⚙  Ajustes")) { mostrarAjustes() })
                   contenedor.addView(
@@ -639,6 +757,75 @@ jobs:
                   traerAlFrente()
               }
 
+              // Verifica los archivos en segundo plano y muestra el resultado en la zona central
+              private fun verificarDisco(zona: LinearLayout) {
+                  val id = ++idEscaneo
+                  discoListo = null
+                  val prog = texto(
+                      tr("Verifying disc files…", "Verificando archivos del disco…"),
+                      15f, false, Color.LTGRAY
+                  )
+                  zona.addView(prog)
+                  ejecutor.execute {
+                      val r = escanear { msg -> runOnUiThread { if (id == idEscaneo) prog.text = msg } }
+                      runOnUiThread {
+                          if (id == idEscaneo && !isFinishing) {
+                              discoListo = r.disco
+                              zona.removeAllViews()
+                              mostrarResultado(zona, r)
+                          }
+                      }
+                  }
+              }
+
+              private fun mostrarResultado(zona: LinearLayout, r: Resultado) {
+                  val d = r.disco
+                  if (d != null) {
+                      zona.addView(texto(tr("Valid disc found:", "Disco válido encontrado:") + "\n" + d.nombre))
+                      zona.addView(boton(tr("▶  Start", "▶  Iniciar")) { iniciarJuego() })
+                      return
+                  }
+                  if (!r.carpetaOk) {
+                      zona.addView(texto(tr("Folder not found:", "No se encontró la carpeta:")))
+                  } else {
+                      zona.addView(texto(tr("No valid disc found in:", "No se encontró un disco válido en:")))
+                  }
+                  zona.addView(texto(DISC_FOLDER, 15f, false, Color.YELLOW))
+                  if (r.binOk && !r.cueOk) {
+                      zona.addView(
+                          texto(
+                              tr(
+                                  "The .bin is valid, but the matching .cue is missing.",
+                                  "El .bin es válido, pero falta el .cue correspondiente."
+                              ), 14f, false, Color.CYAN
+                          )
+                      )
+                  }
+                  if (r.cueOk && !r.binOk) {
+                      zona.addView(
+                          texto(
+                              tr(
+                                  "The .cue is valid, but the matching .bin is missing.",
+                                  "El .cue es válido, pero falta el .bin correspondiente."
+                              ), 14f, false, Color.CYAN
+                          )
+                      )
+                  }
+                  zona.addView(
+                      texto(
+                          tr(
+                              "Accepted discs (file names don't matter, but they must be the exact originals):\n" +
+                                  "• Digimon World (USA): .bin + .cue, both in this folder\n" +
+                                  "• Digimon World (Japan): .iso",
+                              "Discos aceptados (los nombres no importan, pero deben ser los archivos originales exactos):\n" +
+                                  "• Digimon World (USA): .bin + .cue, ambos en esta carpeta\n" +
+                                  "• Digimon World (Japan): .iso"
+                          ), 13f, false, Color.LTGRAY
+                      )
+                  )
+                  zona.addView(boton(tr("Check again", "Comprobar de nuevo")) { mostrarInicio() })
+              }
+
               private fun elegirIdioma() {
                   AlertDialog.Builder(this)
                       .setTitle(tr("Language", "Idioma"))
@@ -652,7 +839,8 @@ jobs:
               // ---------- Juego ----------
               private fun iniciarJuego() {
                   if (retroView != null) return
-                  if (!listoParaJugar()) {
+                  val disco = discoListo
+                  if (disco == null) {
                       mostrarInicio()
                       return
                   }
@@ -667,7 +855,7 @@ jobs:
 
                   val data = GLRetroViewData(this).apply {
                       coreFilePath = CORE_LIB
-                      gameFilePath = DISC_PATH
+                      gameFilePath = disco.ruta
                       systemDirectory = system.absolutePath
                       savesDirectory = saves.absolutePath
                       saveRAMState = if (sramFile.exists()) sramFile.readBytes() else null
@@ -939,7 +1127,7 @@ jobs:
           }
           EOF
 
-          sed -i "s|__DISC_PATH__|${DISC_PATH}|" app/src/main/java/org/elpollopaco/digimonworld/MainActivity.kt
+          sed -i "s|__DISC_FOLDER__|${DISC_FOLDER}|" app/src/main/java/org/elpollopaco/digimonworld/MainActivity.kt
           sed -i "s|versionName = \"1.0\"|versionName = \"${APP_VERSION}\"|" app/build.gradle.kts
           sed -i "s|versionCode = 1|versionCode = ${RUN_NUMBER}|" app/build.gradle.kts
 
