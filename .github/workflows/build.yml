@@ -15,7 +15,7 @@ permissions:
 env:
   # ===================== CONFIGURACIÓN (todo fijo aquí) =====================
   # Ruta de tu disco legal (el .cue, o .chd / .pbp / .m3u). Sin comillas dobles dentro.
-  DISC_PATH: "/storage/emulated/0/Games/Digimon World (USA).cue"
+  DISC_PATH: "/storage/emulated/0/Games/Digimon World.iso"
   # =========================================================================
 
 jobs:
