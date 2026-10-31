@@ -20,7 +20,7 @@ env:
   #   Digimon World (Japan): .iso
   DISC_FOLDER: "/storage/emulated/0/Games"
   # Versión de la app: 1.0, 1.1, 1.2, ... (cámbiala en cada actualización)
-  APP_VERSION: "1.1"
+  APP_VERSION: "1.2"
   # =========================================================================
 
 jobs:
@@ -38,7 +38,7 @@ jobs:
         env:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          mkdir -p p/app/src/main/java/org/elpollopaco/digimonworld p/app/src/main/jniLibs/arm64-v8a
+          mkdir -p p/app/src/main/java/org/elpollopaco/digimonworld p/app/src/main/jniLibs/arm64-v8a p/app/src/main/res/drawable
           cd p
 
           cat > settings.gradle.kts <<'EOF'
@@ -129,6 +129,19 @@ jobs:
           </manifest>
           EOF
 
+          cat > app/src/main/res/drawable/ic_github.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp"
+              android:height="24dp"
+              android:viewportWidth="24"
+              android:viewportHeight="24">
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+          </vector>
+          EOF
+
           cat > app/src/main/java/org/elpollopaco/digimonworld/MainActivity.kt <<'EOF'
           package org.elpollopaco.digimonworld
 
@@ -140,6 +153,7 @@ jobs:
           import android.graphics.Color
           import android.graphics.Paint
           import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
@@ -156,6 +170,7 @@ jobs:
           import android.view.WindowManager
           import android.widget.Button
           import android.widget.FrameLayout
+          import android.widget.ImageView
           import android.widget.LinearLayout
           import android.widget.RadioButton
           import android.widget.RadioGroup
@@ -211,16 +226,21 @@ jobs:
                   get() = p.getString("idioma", IDIOMA_DEFECTO) ?: IDIOMA_DEFECTO
                   set(v) { p.edit().putString("idioma", v).apply() }
 
+              var modoGamepad: Boolean
+                  get() = p.getBoolean("gamepad", false)
+                  set(v) { p.edit().putBoolean("gamepad", v).apply() }
+
               fun dx(id: Int): Int = p.getInt("dx" + id, 0)
               fun dy(id: Int): Int = p.getInt("dy" + id, 0)
               fun mover(id: Int, dx: Int, dy: Int) {
                   p.edit().putInt("dx" + id, dx).putInt("dy" + id, dy).apply()
               }
 
-              // Restablece resolución y controles. El idioma se conserva.
+              // Restablece resolución y controles. El idioma y el modo gamepad se conservan.
               fun restablecer() {
                   val actual = idioma
-                  p.edit().clear().putString("idioma", actual).apply()
+                  val gp = modoGamepad
+                  p.edit().clear().putString("idioma", actual).putBoolean("gamepad", gp).apply()
               }
           }
 
@@ -716,6 +736,12 @@ jobs:
                       verificarDisco(zona)
                   }
                   col.addView(boton(tr("⚙  Settings", "⚙  Ajustes")) { mostrarAjustes() })
+                  val btnGamepad = boton(textoGamepad()) { }
+                  btnGamepad.setOnClickListener {
+                      ajustes.modoGamepad = !ajustes.modoGamepad
+                      btnGamepad.text = textoGamepad()
+                  }
+                  col.addView(btnGamepad)
                   contenedor.addView(
                       scroll,
                       FrameLayout.LayoutParams(
@@ -745,6 +771,34 @@ jobs:
                   )
                   lpVer.setMargins(0, 0, dp(16), dp(16))
                   contenedor.addView(ver, lpVer)
+
+                  // Créditos: arriba a la derecha, pequeños y semitransparentes
+                  val creditos = texto(
+                      tr("Port created by elpollopaco", "Port creado por elpollopaco"),
+                      12f, false, Color.WHITE
+                  )
+                  creditos.alpha = 0.45f
+                  val lpCred = FrameLayout.LayoutParams(
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      Gravity.RIGHT or Gravity.TOP
+                  )
+                  lpCred.setMargins(0, dp(10), dp(14), 0)
+                  contenedor.addView(creditos, lpCred)
+
+                  // GitHub: icono, justo encima del botón de idioma
+                  val gh = ImageView(this)
+                  gh.setImageResource(R.drawable.ic_github)
+                  gh.setPadding(dp(10), dp(10), dp(10), dp(10))
+                  val fondoGh = GradientDrawable()
+                  fondoGh.shape = GradientDrawable.OVAL
+                  fondoGh.setColor(Color.argb(70, 255, 255, 255))
+                  gh.background = fondoGh
+                  gh.contentDescription = "GitHub"
+                  gh.setOnClickListener { abrirGitHub() }
+                  val lpGh = FrameLayout.LayoutParams(dp(48), dp(48), Gravity.LEFT or Gravity.BOTTOM)
+                  lpGh.setMargins(dp(12), 0, 0, dp(72))
+                  contenedor.addView(gh, lpGh)
 
                   root.addView(
                       contenedor,
@@ -824,6 +878,21 @@ jobs:
                       )
                   )
                   zona.addView(boton(tr("Check again", "Comprobar de nuevo")) { mostrarInicio() })
+              }
+
+              private fun textoGamepad(): String {
+                  val estado = if (ajustes.modoGamepad) tr("On", "Activado") else tr("Off", "Desactivado")
+                  return "🎮  " + tr("Gamepad mode: ", "Modo Gamepad: ") + estado
+              }
+
+              private fun abrirGitHub() {
+                  try {
+                      startActivity(
+                          Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/elpollopaco/DigiDroidWorld"))
+                      )
+                  } catch (e: Exception) {
+                      // sin navegador disponible
+                  }
               }
 
               private fun elegirIdioma() {
@@ -919,6 +988,7 @@ jobs:
               // ---------- Controles ----------
               private fun construirControles(editar: Boolean) {
                   quitarControles()
+                  if (ajustes.modoGamepad) return // Modo Gamepad: sin controles táctiles
                   val capa = CapaControles(this)
                   capa.edicion = editar
                   capaControles = capa
@@ -993,33 +1063,44 @@ jobs:
                       )
                   }
 
-                  // Controles
-                  col.addView(texto(tr("Controls", "Controles"), 16f, true))
-                  val tamTxt = texto(tr("Size: ", "Tamaño: ") + ajustes.tamano + "%", 14f)
-                  col.addView(tamTxt)
-                  val tam = SeekBar(this)
-                  tam.max = 100
-                  tam.progress = ajustes.tamano - 50
-                  tam.setOnSeekBarChangeListener(cambio { p ->
-                      ajustes.tamano = p + 50
-                      tamTxt.text = tr("Size: ", "Tamaño: ") + ajustes.tamano + "%"
-                      construirControles(enEdicion)
-                  })
-                  col.addView(tam)
+                  if (ajustes.modoGamepad) {
+                      col.addView(
+                          texto(
+                              tr(
+                                  "Gamepad mode is ON: touch controls are hidden.",
+                                  "Modo Gamepad activado: los controles táctiles están ocultos."
+                              ), 14f, false, Color.LTGRAY
+                          )
+                      )
+                  } else {
+                      // Controles
+                      col.addView(texto(tr("Controls", "Controles"), 16f, true))
+                      val tamTxt = texto(tr("Size: ", "Tamaño: ") + ajustes.tamano + "%", 14f)
+                      col.addView(tamTxt)
+                      val tam = SeekBar(this)
+                      tam.max = 100
+                      tam.progress = ajustes.tamano - 50
+                      tam.setOnSeekBarChangeListener(cambio { p ->
+                          ajustes.tamano = p + 50
+                          tamTxt.text = tr("Size: ", "Tamaño: ") + ajustes.tamano + "%"
+                          construirControles(enEdicion)
+                      })
+                      col.addView(tam)
 
-                  val opaTxt = texto(tr("Opacity: ", "Opacidad: ") + ajustes.opacidad + "%", 14f)
-                  col.addView(opaTxt)
-                  val opa = SeekBar(this)
-                  opa.max = 90
-                  opa.progress = ajustes.opacidad - 10
-                  opa.setOnSeekBarChangeListener(cambio { p ->
-                      ajustes.opacidad = p + 10
-                      opaTxt.text = tr("Opacity: ", "Opacidad: ") + ajustes.opacidad + "%"
-                      botones.forEach { it.invalidate() }
-                  })
-                  col.addView(opa)
+                      val opaTxt = texto(tr("Opacity: ", "Opacidad: ") + ajustes.opacidad + "%", 14f)
+                      col.addView(opaTxt)
+                      val opa = SeekBar(this)
+                      opa.max = 90
+                      opa.progress = ajustes.opacidad - 10
+                      opa.setOnSeekBarChangeListener(cambio { p ->
+                          ajustes.opacidad = p + 10
+                          opaTxt.text = tr("Opacity: ", "Opacidad: ") + ajustes.opacidad + "%"
+                          botones.forEach { it.invalidate() }
+                      })
+                      col.addView(opa)
 
-                  col.addView(boton(tr("Move controls", "Mover controles")) { entrarEdicion() })
+                      col.addView(boton(tr("Move controls", "Mover controles")) { entrarEdicion() })
+                  }
                   col.addView(boton(tr("Reset all", "Restablecer todo")) {
                       ajustes.restablecer()
                       cerrarPanel()
