@@ -359,6 +359,14 @@ jobs:
 
           sed -i "s|__DISC_PATH__|${DISC_PATH}|" app/src/main/java/org/elpollopaco/digimonworld/MainActivity.kt
 
+      - name: Icono de la app (opcional - sube icon.png a la raíz del repo)
+        run: |
+          if [ -f icon.png ]; then
+            mkdir -p p/app/src/main/res/mipmap-xxxhdpi
+            cp icon.png p/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+            sed -i 's|@android:drawable/sym_def_app_icon|@mipmap/ic_launcher|' p/app/src/main/AndroidManifest.xml
+          fi
+
       - name: Descargar núcleo PCSX ReARMed (arm64)
         run: |
           curl -fL -o core.zip https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/pcsx_rearmed_libretro_android.so.zip
